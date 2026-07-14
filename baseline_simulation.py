@@ -58,4 +58,4 @@ while events:
 print("=== BASELINE SIMULATION (No Safeguards) ===")
 print(f"Total Transactions : {NUM_TRANSACTIONS}")
 print(f"Total Violations   : {violations}")
-print(f"Violation Rate     : {round((violations / NUM_TRANSACTIONS) * 100, 4)}%")
+print(f"Violation Rate    : {round((violations / NUM_TRANSACTIONS) * 100, 4)}%")
