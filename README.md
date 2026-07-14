@@ -104,4 +104,3 @@ It models **causal ordering behavior** only. Results reflect simulation paramete
 
 This simulation was built to support research into causality violation rates in async payment pipelines and their operational impact.
 
-Related LinkedIn writeup: *[add your post link here]*
