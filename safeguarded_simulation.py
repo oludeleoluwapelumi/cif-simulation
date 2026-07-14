@@ -81,7 +81,7 @@ def handle_commit(tx_id, current_time, retry_count):
 
 
 # --- Main Simulation Loop ---
-worker_clocks = [0.0] * NUM_WORKERS
+worker_clocks = [0.0] * NUM-WORKERS
 
 while events:
     time, event_type, tx_id, retry_count = heapq.heappop(events)
