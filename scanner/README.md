@@ -56,3 +56,5 @@ python cif_scanner.py \
   --type-col type \
   --credit-types DEPOSIT,CASH_IN \
   --flag-cols isFraud,isFlagged
+
+Try the scanner: run CIF's core check against your own transaction data, entirely on your own machine, no data leaves your computer. See [scanner/README.md](scanner/README.md).
