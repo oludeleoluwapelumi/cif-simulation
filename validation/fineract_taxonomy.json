@@ -1,0 +1,56 @@
+{
+  "description": "Machine-readable version of the CIF taxonomy mapping against Apache Fineract's public JIRA history. Companion to validation/FINERACT_TAXONOMY_MAPPING.md, which has full narrative context and reasoning for each entry.",
+  "generated_from": "validation/FINERACT_TAXONOMY_MAPPING.md",
+  "entries": [
+    {
+      "ticket_id": "FINERACT-2304",
+      "title": "Batch retry issue, duplicate records",
+      "url": "https://issues.apache.org/jira/browse/FINERACT-2304",
+      "status": "Resolved",
+      "resolution": "Fixed",
+      "cif_classification": "Level 2, Event Replay",
+      "match_confidence": "confirmed",
+      "summary": "A batch API call with an open transaction could trigger retry logic within that same open transaction, producing duplicate entries. If a transaction had already completed but an exception still occurred inside the retry boundary, a retry could fire on an already completed operation."
+    },
+    {
+      "ticket_id": "FINERACT-1744",
+      "title": "System idempotency",
+      "url": "https://issues.apache.org/jira/browse/FINERACT-1744",
+      "status": "Resolved",
+      "resolution": "Implemented",
+      "cif_classification": "Does not map to a single severity level; systemic fix",
+      "match_confidence": "confirmed",
+      "summary": "Not a bug report. A proactive systemic fix. Fineract identified that in high availability deployments, retried API operations could execute twice when a prior execution had already completed, and built dedicated infrastructure against it: an Idempotency-Key API header, idempotency handling for external events, and new command statuses (UNDER_PROCESSING, ERROR) to track execution state."
+    },
+    {
+      "ticket_id": "FINERACT-2188",
+      "title": "Duplicate repayments reported via mobile app",
+      "url": "https://issues.apache.org/jira/browse/FINERACT-2188",
+      "status": "Closed",
+      "resolution": "Abandoned",
+      "cif_classification": "Level 2, Event Replay",
+      "match_confidence": "symptom-consistent, root cause unconfirmed",
+      "summary": "A user reported repayments duplicating within milliseconds through a mobile app. Root cause was never formally established; could be a core platform issue, a client side integration problem, or a duplicated third party callback."
+    },
+    {
+      "ticket_id": "FINERACT-2457",
+      "title": "Share transaction chronological validation",
+      "url": "https://issues.apache.org/jira/browse/FINERACT-2457",
+      "status": "Confirmed via linked pull request",
+      "resolution": null,
+      "cif_classification": "Does not cleanly fit the existing four levels; candidate for future taxonomy revision",
+      "match_confidence": "confirmed, distinct mechanism",
+      "summary": "Share transaction validation blocked new transactions dated earlier than any existing transaction on the account, including transactions that had already been rejected or reversed. The system's record of transaction history included events that were no longer financially real, and enforced ordering rules against that stale history."
+    },
+    {
+      "ticket_id": "FINERACT-1876",
+      "title": "Concurrent update serialization error",
+      "url": "https://issues.apache.org/jira/browse/FINERACT-1876",
+      "status": "Resolved",
+      "resolution": "Fixed",
+      "cif_classification": "Not applicable; explicitly ruled out",
+      "match_confidence": "ruled_out",
+      "summary": "Intermittent PostgreSQL error (could not serialize access due to concurrent update) during scheduled job execution, caused by strict transaction isolation under concurrent access. CIF describes silent divergence with no alert; this is the opposite, PostgreSQL's own isolation guarantees caught the conflict and threw a hard, visible error. A safeguard working as intended, not a CIF event."
+    }
+  ]
+}
