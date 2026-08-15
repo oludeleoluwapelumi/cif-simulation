@@ -58,3 +58,9 @@ python cif_scanner.py \
   --flag-cols isFraud,isFlagged
 
 Try the scanner: run CIF's core check against your own transaction data, entirely on your own machine, no data leaves your computer. See [scanner/README.md](scanner/README.md).
+
+
+Two additional companion files support reproducibility:
+
+- [validation/paysim_reconciliation.py](validation/paysim_reconciliation.py), the actual script used to produce the PaySim reconciliation results above, runnable directly against the same dataset.
+- [validation/fineract_taxonomy.json](validation/fineract_taxonomy.json), a machine-readable version of the Fineract taxonomy mapping, including the one ticket explicitly ruled out, for anyone who wants to consume the classifications programmatically rather than read the narrative writeup.
