@@ -1,292 +1,188 @@
-#!/usr/bin/env python3
-"""
-CIF Scanner: a local, offline tool for checking transaction logs against
-one specific CIF-shaped pattern, a recorded transaction whose amount and
-direction do not reconcile with the account's recorded balance change,
-without an existing error or fraud flag.
+# CIF Scanner
 
-This runs entirely on your machine. No data leaves your computer, and
-this tool does not send anything anywhere. It also does not modify the
-input file.
+A small, local, offline command-line tool for checking transaction logs for one specific pattern: a recorded transaction whose amount and direction do not reconcile with the account's recorded balance change, without an existing error or fraud flag.
 
-Supports CSV, JSON array (a file containing a single JSON list of records),
-and JSON Lines (one JSON object per line, common in real production log
-exports). CSV and JSON Lines are streamed row by row; a plain JSON array
-must be fully parsed by the json module first, that's an inherent property
-of the format, not a design choice here.
+This is part of the **CIF (Chronological Input Failure)** project. If you're new to CIF, start with the main repo. This tool is one piece of it, not the whole framework.
 
-What this checks:
-    For each row, does old_balance + / - amount (direction depends on
-    transaction type) equal new_balance? If not, and nothing in the data
-    flags that row as an error, it is reported as a candidate anomaly.
+## What this actually checks
 
-What this does NOT do:
-    - It does not prove a bug exists. A candidate anomaly is a starting
-      point for investigation, not a conclusion.
-    - It does not check validation-before-commit ordering directly, that
-      requires separate validation and commit timestamps, which most
-      transaction logs do not record. This is a narrower, related check:
-      whether the recorded end state is internally consistent.
-    - It will produce false positives on data with quirks it doesn't know
-      about (see the PaySim writeup at the CIF repo for two real examples
-      of this happening and how they were identified).
+For each transaction row, does:
 
-Usage:
-    python cif_scanner.py --file transactions.csv \
-        --amount-col amount \
-        --old-balance-col old_balance \
-        --new-balance-col new_balance \
-        --type-col type \
-        --credit-types CASH_IN,DEPOSIT \
-        --flag-cols isFraud,isFlagged
+**old_balance ± amount = new_balance?**
 
-    python cif_scanner.py --file transactions.jsonl \
-        --amount-col amount \
-        --old-balance-col old_balance \
-        --new-balance-col new_balance
+If not, and nothing in your data already flags that row as an error or fraud case, it gets reported.
 
-Only --file, --amount-col, --old-balance-col, and --new-balance-col are
-required. Everything else has a sensible default or can be omitted.
-"""
+That's it. That's the whole check.
 
-import argparse
-import sys
-import csv
-import json
+It is a narrower, more limited test than the original CIF mechanism (validation completing before commit), which needs separate validation and commit timestamps that most transaction logs don't record.
 
+This tool checks something related but smaller: whether the recorded end state is internally consistent with the transaction that supposedly produced it.
 
-def parse_args():
-    p = argparse.ArgumentParser(
-        description="Scan a transaction log for candidate balance anomalies, "
-                    "a pattern consistent with CIF (Chronological Input Failure)."
-    )
-    p.add_argument("--file", required=True, help="Path to the file to scan (CSV, JSON, or JSON Lines)")
-    p.add_argument("--format", default=None, choices=["csv", "json", "jsonl"],
-                   help="File format. If omitted, auto-detected from the file extension "
-                        "(.csv, .json, .jsonl/.ndjson)")
-    p.add_argument("--amount-col", required=True, help="Field name for transaction amount")
-    p.add_argument("--old-balance-col", required=True, help="Field name for balance before the transaction")
-    p.add_argument("--new-balance-col", required=True, help="Field name for balance after the transaction")
-    p.add_argument("--type-col", default=None,
-                   help="Field name for transaction type. Strongly recommended: without it, "
-                        "every transaction is assumed to subtract from the balance, which will "
-                        "misclassify any deposit-type transaction as an anomaly.")
-    p.add_argument("--credit-types", default="",
-                   help="Comma-separated transaction type values where the amount is ADDED "
-                        "to the balance rather than subtracted (e.g. deposits, cash-in). "
-                        "Matching is case-insensitive.")
-    p.add_argument("--flag-cols", default="",
-                   help="Comma-separated field names that indicate a known error/fraud flag. "
-                        "Rows where any of these are truthy are excluded from the candidate "
-                        "anomaly count but still reported separately as known_flagged.")
-    p.add_argument("--tolerance", type=float, default=0.01,
-                   help="Numeric tolerance for considering balances equal (default 0.01)")
-    p.add_argument("--output", default=None,
-                   help="Optional path to write candidate anomaly rows to as a CSV. If omitted, "
-                        "they are only summarized, not written out.")
-    return p.parse_args()
+## Supported formats
 
+* **CSV (`.csv`)**
+* **JSON array (`.json`)** — a file containing a single JSON list of records, or an object with the list under a key like `transactions`, `records`, `data`, `rows`, or `logs`
+* **JSON Lines (`.jsonl` or `.ndjson`)** — one JSON object per line, common in real production log exports, streamed line by line rather than loaded fully into memory
 
-def to_float(value):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+Format is auto-detected from the file extension, or can be set explicitly with:
 
+```bash
+--format csv
+--format json
+--format jsonl
+```
 
-def is_truthy_flag(value):
-    if value is None:
-        return False
-    v = str(value).strip().lower()
-    return v not in ("", "0", "0.0", "false", "no", "none")
+## What this does NOT do
 
+### It does not prove a bug exists
 
-def detect_format(file_path, explicit_format):
-    if explicit_format:
-        return explicit_format
-    lower = file_path.lower()
-    if lower.endswith(".csv"):
-        return "csv"
-    if lower.endswith(".jsonl") or lower.endswith(".ndjson"):
-        return "jsonl"
-    if lower.endswith(".json"):
-        return "json"
-    return "csv"
+A candidate anomaly is a starting point for investigation, not a conclusion.
 
+### It does not know your data's specific quirks
 
-def read_records(file_path, file_format):
-    """
-    A generator yielding dict-like records regardless of source format, so
-    the rest of the scanner treats CSV, JSON array, and JSON Lines input
-    identically. CSV and JSONL are streamed line by line. A plain JSON
-    array is fully parsed into memory first, that's a property of the
-    JSON array format itself (it's one top-level structure), not
-    something avoidable while still accepting standard JSON.
-    """
-    if file_format == "csv":
-        with open(file_path, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                yield row
+Every real dataset has some.
 
-    elif file_format == "jsonl":
-        with open(file_path, encoding="utf-8") as f:
-            for line_num, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield json.loads(line)
-                except json.JSONDecodeError as e:
-                    print(f"WARNING: skipping malformed JSON on line {line_num}: {e}")
-                    continue
+When this tool was first tested against the public PaySim dataset, the very first run flagged **75.92% of transactions** — not because there were that many real problems, but because of two dataset-specific artifacts:
 
-    elif file_format == "json":
-        with open(file_path, encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            for key in ("transactions", "records", "data", "rows", "logs"):
-                if key in data and isinstance(data[key], list):
-                    data = data[key]
-                    break
-            else:
-                print("ERROR: JSON file is an object, but no list found under a key "
-                      "like 'transactions', 'records', 'data', 'rows', or 'logs'.")
-                print("Wrap your records in a plain JSON array instead, or use one of those key names.")
-                sys.exit(1)
-        if not isinstance(data, list):
-            print("ERROR: expected a JSON array of transaction records.")
-            sys.exit(1)
-        for record in data:
-            yield record
+* untracked merchant balances
+* balances clipped to zero instead of going negative
 
-    else:
-        print(f"ERROR: unrecognized format '{file_format}'")
-        sys.exit(1)
+Those artifacts had to be identified and excluded by hand.
 
+The honest writeup of that process is here:
 
-def scan(args):
-    credit_types = {t.strip().upper() for t in args.credit_types.split(",") if t.strip()}
-    flag_cols = [c.strip() for c in args.flag_cols.split(",") if c.strip()]
-    file_format = detect_format(args.file, args.format)
+https://dev.to/oludeleoluwapelumi/testing-cifs-pattern-against-real-payment-data-and-getting-it-wrong-twice-before-getting-it-right-2n3
 
-    if not args.type_col:
-        print("WARNING: no --type-col supplied. Every transaction will be assumed to")
-        print("subtract from the balance. If your data includes deposits, credits, or")
-        print("cash-in transactions, this will misclassify them as anomalies.")
-        print()
+### It does not send your data anywhere
 
-    total = 0
-    skipped_bad_data = 0
-    candidate_anomalies = []
-    known_flagged = []
-    required = [args.amount_col, args.old_balance_col, args.new_balance_col]
-    checked_columns = False
+Everything runs locally, on your machine, using Python's standard library only.
 
-    for row in read_records(args.file, file_format):
-        total += 1
+Nothing is uploaded, logged externally, or transmitted.
 
-        if not checked_columns:
-            missing = [c for c in required if c not in row]
-            if missing:
-                print(f"ERROR: field(s) not found in first record: {missing}")
-                print(f"Fields available: {sorted(row.keys())}")
-                sys.exit(1)
-            checked_columns = True
+### It does not modify the input file
 
-        amount = to_float(row.get(args.amount_col))
-        old_bal = to_float(row.get(args.old_balance_col))
-        new_bal = to_float(row.get(args.new_balance_col))
+The scanner only reads the input data and optionally writes candidate anomalies to a separate CSV file.
 
-        if amount is None or old_bal is None or new_bal is None:
-            skipped_bad_data += 1
-            continue
+### It does not replace judgment
 
-        row_type_raw = row.get(args.type_col) if args.type_col else None
-        row_type_normalized = str(row_type_raw).strip().upper() if row_type_raw is not None else None
-        is_credit = row_type_normalized in credit_types if args.type_col else False
+Read the flagged rows. Ask why.
 
-        expected = old_bal + amount if is_credit else old_bal - amount
-        diff = round(expected - new_bal, 6)
+Most of the time, a high mismatch rate on a first run means the check needs refining for your specific data, not that your system is broken.
 
-        if abs(diff) > args.tolerance:
-            is_flagged = any(is_truthy_flag(row.get(c)) for c in flag_cols)
-            record = dict(row)
-            record["_expected_balance"] = expected
-            record["_actual_balance"] = new_bal
-            record["_difference"] = diff
-            record["_direction_used"] = "credit" if is_credit else "debit"
-            record["_transaction_type"] = row_type_raw
-            record["_flag_status"] = "known_flagged" if is_flagged else "candidate_anomaly"
+## Requirements
 
-            if is_flagged:
-                known_flagged.append(record)
-            else:
-                candidate_anomalies.append(record)
+* Python 3.7 or later
+* No external dependencies
+* Python standard library only
 
-    return {
-        "format_used": file_format,
-        "total": total,
-        "skipped_bad_data": skipped_bad_data,
-        "checkable": total - skipped_bad_data,
-        "candidate_anomalies": candidate_anomalies,
-        "known_flagged": known_flagged,
-    }
+## Usage
 
+### CSV
 
-def print_report(results, args):
-    checkable = results["checkable"]
-    candidates = len(results["candidate_anomalies"])
-    known = len(results["known_flagged"])
+```bash
+python cif_scanner.py \
+  --file transactions.csv \
+  --amount-col amount \
+  --old-balance-col old_balance \
+  --new-balance-col new_balance \
+  --type-col type \
+  --credit-types DEPOSIT,CASH_IN \
+  --flag-cols isFraud,isFlagged
+```
 
-    print("=" * 60)
-    print("CIF SCANNER REPORT")
-    print("=" * 60)
-    print(f"Input format detected:        {results['format_used']}")
-    print(f"Total rows read:              {results['total']}")
-    print(f"Skipped (missing/bad data):   {results['skipped_bad_data']}")
-    print(f"Checkable rows:               {checkable}")
-    print()
-    print(f"Candidate anomalies:          {candidates}", end="")
-    if checkable > 0:
-        print(f"  ({candidates / checkable * 100:.4f}% of checkable rows)")
-    else:
-        print()
-    print(f"Known flagged mismatches:     {known}  (already caught by existing error/fraud flags)")
-    print()
+### JSON Lines
 
-    if candidates == 0:
-        print("No candidate anomalies found. This does not confirm your system is free of")
-        print("CIF-shaped issues, only that this specific check, on this sample, found none.")
-    else:
-        print(f"Found {candidates} candidate anomaly row(s), where the recorded transaction")
-        print("does not reconcile with the balance change, and nothing in the data flags it")
-        print("as an error. This is a starting point for investigation, not a confirmed bug.")
-        print()
-        print("IMPORTANT: before concluding anything, check whether your data has its own")
-        print("quirks that could explain this innocently, similar to what was found scanning")
-        print("PaySim: untracked balances for certain account types, or balances clipped to")
-        print("zero instead of going negative. Read the flagged rows before drawing conclusions.")
+```bash
+python cif_scanner.py \
+  --file transactions.jsonl \
+  --amount-col amount \
+  --old-balance-col old_balance \
+  --new-balance-col new_balance
+```
 
-    if args.output and candidates > 0:
-        fieldnames = list(results["candidate_anomalies"][0].keys())
-        with open(args.output, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(results["candidate_anomalies"])
-        print()
-        print(f"Candidate anomaly rows written to: {args.output}")
+## Required arguments
 
-    print("=" * 60)
+`--file`
+Path to your log file.
 
+`--amount-col`
+Field name for the transaction amount.
 
-def main():
-    args = parse_args()
-    results = scan(args)
-    print_report(results, args)
+`--old-balance-col`
+Field name for the balance before the transaction.
 
+`--new-balance-col`
+Field name for the balance after the transaction.
 
-if __name__ == "__main__":
-    main()
-SCANNER_EOF
-echo "scanner written"
+## Optional arguments
+
+`--format`
+`csv`, `json`, or `jsonl`. Auto-detected from the file extension if omitted.
+
+`--type-col`
+Field name for transaction type.
+
+**Strongly recommended:** without it, every transaction is assumed to subtract from the balance, which will misclassify any deposit-type transaction as an anomaly.
+
+`--credit-types`
+Comma-separated list of type values where the amount should be added to the balance rather than subtracted.
+
+Matching is case-insensitive.
+
+`--flag-cols`
+Comma-separated list of fields that already indicate a known error or fraud case.
+
+Rows matching these are reported separately as **known flagged mismatches**, and are not counted in the candidate anomaly total.
+
+`--tolerance`
+Numeric tolerance for floating-point comparison.
+
+Default: `0.01`
+
+`--output`
+Path to write candidate anomaly rows to a CSV file for review.
+
+## Try it first on the included sample
+
+A small, obviously fake sample file is included so you can see what the tool does before pointing it at anything real:
+
+```bash
+python cif_scanner.py \
+  --file sample_transactions.csv \
+  --amount-col amount \
+  --old-balance-col old_balance \
+  --new-balance-col new_balance \
+  --type-col type \
+  --credit-types DEPOSIT \
+  --flag-cols is_flagged
+```
+
+## Running the test suite
+
+A synthetic test suite covers:
+
+* known-good transactions
+* genuine anomalies
+* pre-flagged mismatches
+* credits
+* debits
+* tolerance boundaries
+* malformed input
+* the real PaySim clipped-balance artifact
+
+Run it with:
+
+```bash
+python test_cif_scanner.py
+```
+
+## If it flags something on your real data
+
+Read the flagged rows before concluding anything.
+
+If you think you've found something genuinely interesting, or if the tool behaves in a way that seems wrong for your data structure, open an issue on the repo, or see the main README for how to reach me.
+
+I'm specifically interested in hearing about both **real findings** and **cases where the tool got it wrong**.
+
+The second one is just as useful as the first.
+
